@@ -13,9 +13,10 @@ import {
 	getWorkspaceTestPatterns,
 	testData,
 } from './test-tree/createTests';
+import { callConcretePlayback } from './ui/concrete-playback/concretePlayback';
 import { callViewerReport } from './ui/reportView/callReport';
 import { showInformationMessage } from './ui/showMessage';
-import { checkFileForProofs } from './ui/sourceCodeParser';
+import { SourceCodeParser } from './ui/sourceCodeParser';
 import { startWatchingWorkspace } from './ui/watchWorkspace';
 import { checkCargoExist, getContentFromFilesystem, getRootDirURI } from './utils';
 
@@ -65,8 +66,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				// console.log("Data for each test is", data);
 				// check if this is an object of class testcase (that we wrote)
 				if (data instanceof TestCase) {
-					// TestRun is the queue to which we add a test
-					// TODO: Can we parallelize this queue somehow?
 					run.enqueued(test);
 					// This queue takes a tuple of test and it's data
 					queue.push({ test, data });
@@ -101,10 +100,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}
 		};
 
-		/**
-		 * Run the test queue serially
-		 * TODO: Parallelize test runs if they don't have race conditions
-		 */
 		const runTestQueue = async (): Promise<void> => {
 			for (const { test, data } of queue) {
 				run.appendOutput(`Running ${test.id}\r\n`);
@@ -191,7 +186,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	// Run Cargo Kani
 	const runcargoKani = vscode.commands.registerCommand('Kani.runcargoKani', async () => {
-		//TODO: Always point to the root of the cargo crate (or source file) before running cargo kani
 		showInformationMessage('Kani.runcargoKani');
 	});
 
@@ -200,6 +194,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		'Kani.runViewerReport',
 		async (harnessArgs) => {
 			callViewerReport('Kani.runViewerReport', harnessArgs);
+		},
+	);
+
+	// Register the run viewer report command
+	const runningConcretePlayback = vscode.commands.registerCommand(
+		'Kani.runConcretePlayback',
+		async (harnessArgs) => {
+			callConcretePlayback('Kani.runConcretePlayback', harnessArgs);
 		},
 	);
 
@@ -213,7 +215,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			return;
 		}
 
-		if (!checkFileForProofs(await getContentFromFilesystem(e.uri))) {
+		if (!SourceCodeParser.checkFileForProofs(await getContentFromFilesystem(e.uri))) {
 			return;
 		}
 
@@ -223,7 +225,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	}
 
 	// Update the test tree with proofs whenever a test case is opened
-	// TODO: Make this configurable
 	context.subscriptions.push(
 		vscode.workspace.onDidOpenTextDocument(updateNodeForDocument),
 		// vscode.workspace.onDidChangeTextDocument(e => updateNodeForDocument(e.document)),
@@ -232,4 +233,5 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	context.subscriptions.push(runKani);
 	context.subscriptions.push(runcargoKani);
 	context.subscriptions.push(runningViewerReport);
+	context.subscriptions.push(runningConcretePlayback);
 }

@@ -4,8 +4,12 @@ import * as vscode from 'vscode';
 import { MarkdownString, TestMessage, Uri } from 'vscode';
 
 import { KaniResponse } from '../constants';
-import { captureFailedChecks, runCargoKaniTest, runKaniHarness, runKaniHarnessInterface } from '../model/kaniBinaryRunner';
-import { checkFileForProofs, parseRustfile } from '../ui/sourceCodeParser';
+import {
+	captureFailedChecks,
+	runCargoKaniTest,
+	runKaniHarnessInterface,
+} from '../model/kaniCommandCreate';
+import { SourceCodeParser } from '../ui/sourceCodeParser';
 import { getContentFromFilesystem } from '../utils';
 
 export type KaniData = TestFile | TestCase | string;
@@ -48,7 +52,9 @@ export async function findInitialFiles(
 	rootItem?: vscode.TestItem,
 ): Promise<void> {
 	for (const file of await vscode.workspace.findFiles(pattern)) {
-		const fileHasProofs: boolean = checkFileForProofs(await getContentFromFilesystem(file));
+		const fileHasProofs: boolean = SourceCodeParser.checkFileForProofs(
+			await getContentFromFilesystem(file),
+		);
 		if (fileHasProofs) {
 			if (rootItem) {
 				getOrCreateFile(controller, file, rootItem);
@@ -56,7 +62,6 @@ export async function findInitialFiles(
 				getOrCreateFile(controller, file);
 			}
 		} else {
-			//TODO: Handle cases where rust files dont have proofs
 			console.log(fileHasProofs, file);
 		}
 	}
@@ -145,13 +150,13 @@ export class TestFile {
 		};
 
 		// Trigger the parser and process extracted metadata to create a test case
-		parseRustfile(content, {
-			onTest: (range, name, harnessType, args) => {
+		SourceCodeParser.parseRustfile(content, {
+			onTest: (range, name, proofBoolean, args) => {
 				const parent = ancestors[ancestors.length - 1];
 				if (!item.uri || !item.uri.fsPath) {
 					throw new Error('No item or item path found');
 				}
-				const data: TestCase = new TestCase(item.uri.fsPath, name, harnessType, args);
+				const data: TestCase = new TestCase(item.uri.fsPath, name, proofBoolean, args);
 				const id: string = `${item.uri}/${data.getLabel()}`;
 
 				const tcase: vscode.TestItem = controller.createTestItem(id, data.getLabel(), item.uri);
@@ -187,15 +192,15 @@ export class TestFile {
  *
  * @param file_name - name of the harness that is to be verified
  * @param harness_name - name of harness to be verified
- * @param harness_type - True of proof, false if bolero harness
- * @param harness_type - unwind value of the harness
+ * @param proof_boolean - True if proof, false if bolero harness
+ * @param harness_unwind_value - unwind value of the harness (if it exists)
  * @returns verification status (i.e success or failure)
  */
 export class TestCase {
 	constructor(
 		readonly file_name: string,
 		readonly harness_name: string,
-		readonly harness_type: boolean,
+		readonly proof_boolean: boolean,
 		readonly harness_unwind_value?: number,
 	) {}
 
@@ -206,7 +211,7 @@ export class TestCase {
 	// Run Kani on the harness, create links and pass/fail ui, present to the user
 	async run(item: vscode.TestItem, options: vscode.TestRun): Promise<void> {
 		const start: number = Date.now();
-		if (this.harness_type) {
+		if (this.proof_boolean) {
 			const actual: number = await this.evaluate(
 				this.file_name,
 				this.harness_name,
@@ -216,14 +221,8 @@ export class TestCase {
 			if (actual === 0) {
 				options.passed(item, duration);
 			} else {
-				// const message = vscode.TestMessage.diff(`Expected ${item.label}`, String(this.expected), String(actual));
-				// message.location = new vscode.Location(item.uri!, item.range!);
-
-				//TODO: Add Property that failed as the info to be displayed
-				//TODO: This is where the debugger will be plugged in, eventually
 				const location = new vscode.Location(item.uri!, item.range!);
 				const responseObject: KaniResponse = await captureFailedChecks(
-					this.file_name,
 					this.harness_name,
 					this.harness_unwind_value,
 				);
@@ -233,7 +232,7 @@ export class TestCase {
 					failedChecks,
 					this.file_name,
 					this.harness_name,
-					this.harness_type,
+					this.proof_boolean,
 					failedMessage,
 				);
 
@@ -260,7 +259,7 @@ export class TestCase {
 					failedChecks,
 					this.file_name,
 					this.harness_name,
-					this.harness_type,
+					this.proof_boolean,
 					failedMessage,
 				);
 				const messageWithLink: vscode.TestMessage = currentCase.handleFailure();
@@ -273,12 +272,11 @@ export class TestCase {
 	// Run kani on the file, crate with given arguments
 	async evaluate(rsFile: string, harness_name: string, args?: number): Promise<number> {
 		if (vscode.workspace.workspaceFolders !== undefined) {
-			//TODO: Change this to running harness
 			if (args === undefined || NaN) {
-				const outputKani: number = await runKaniHarnessInterface(rsFile!, harness_name);
+				const outputKani: number = await runKaniHarnessInterface(harness_name);
 				return outputKani;
 			} else {
-				const outputKani: number = await runKaniHarnessInterface(rsFile!, harness_name, args);
+				const outputKani: number = await runKaniHarnessInterface(harness_name, args);
 				return outputKani;
 			}
 		}
@@ -327,7 +325,8 @@ class FailedCase extends TestCase {
 	}
 
 	handleFailure(): TestMessage {
-		const finalFailureMessage: MarkdownString = this.appendLink(this.failed_checks);
+		const failureMessage: MarkdownString = this.appendLink(this.failed_checks);
+		const finalFailureMessage: MarkdownString = this.appendConcretePlaybackLink(failureMessage);
 		const messageWithLink = new TestMessage(finalFailureMessage);
 		return messageWithLink;
 	}
@@ -336,11 +335,37 @@ class FailedCase extends TestCase {
 	appendLink(failedChecks: string): MarkdownString {
 		const sample: MarkdownString = this.makeMarkdown(failedChecks);
 		// vscode.commands.executeCommand('Kani.runViewerReport', this.harness_name);
-		const args = [{ harnessName: this.harness_name, harnessFile: this.file_name, harnessType: this.harness_type }];
+		const args = [
+			{
+				harnessName: this.harness_name,
+				harnessFile: this.file_name,
+				harnessType: this.proof_boolean,
+			},
+		];
 		const stageCommandUri = Uri.parse(
 			`command:Kani.runViewerReport?${encodeURIComponent(JSON.stringify(args))}`,
 		);
-		sample.appendMarkdown(`[View Report for ${this.harness_name}](${stageCommandUri})`);
+		sample.appendMarkdown(`[Generate report for ${this.harness_name}](${stageCommandUri})`);
+
+		return sample;
+	}
+
+	// Add link and present to the user as the diff message
+	appendConcretePlaybackLink(sample: MarkdownString): MarkdownString {
+		sample.appendMarkdown('<br>');
+		const args = [
+			{
+				harnessName: this.harness_name,
+				harnessFile: this.file_name,
+				harnessType: this.proof_boolean,
+			},
+		];
+		const concretePlaybackUri: Uri = Uri.parse(
+			`command:Kani.runConcretePlayback?${encodeURIComponent(JSON.stringify(args))}`,
+		);
+		sample.appendMarkdown(
+			`[Run concrete playback for ${this.harness_name}](${concretePlaybackUri})`,
+		);
 
 		return sample;
 	}
@@ -351,11 +376,11 @@ class FailedCase extends TestCase {
 		placeholderMarkdown.supportHtml = true;
 		placeholderMarkdown.isTrusted = true;
 
-		if(failedChecks === undefined) {
+		if (failedChecks === undefined) {
 			return placeholderMarkdown;
 		}
 
-		const lines = failedChecks.split('\n');
+		const lines: string[] = failedChecks.split('\n');
 
 		for (const line of lines) {
 			placeholderMarkdown.appendMarkdown(line);
