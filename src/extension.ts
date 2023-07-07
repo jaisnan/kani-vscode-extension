@@ -29,6 +29,10 @@ import {
 	getRootDirURI,
 	showErrorWithReportIssueButton,
 } from './utils';
+import { StatusBarToggler } from './coverage/statusBarToggler';
+import { Config } from './coverage/config';
+import { Coverage } from './coverage/coverage';
+import { Gutters } from './coverage/gutter';
 
 // Entry point of the extension
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -251,4 +255,49 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			connectToDebugger(programName),
 		),
 	);
+
+	const outputChannel = vscode.window.createOutputChannel("coverage-gutters");
+    const configStore = new Config(context);
+    const statusBarToggler = new StatusBarToggler(configStore);
+    const coverage = new Coverage(configStore);
+    const gutters = new Gutters(
+        configStore,
+        coverage,
+        outputChannel,
+        statusBarToggler,
+    );
+
+	const previewCoverageReport = vscode.commands.registerCommand(
+        "coverage-gutters.previewCoverageReport",
+        gutters.previewCoverageReport.bind(gutters),
+    );
+    const display = vscode.commands.registerCommand(
+        "coverage-gutters.displayCoverage",
+        gutters.displayCoverageForActiveFile.bind(gutters),
+    );
+    const toggle = vscode.commands.registerCommand(
+        "coverage-gutters.toggleCoverage",
+        gutters.toggleCoverageForActiveFile.bind(gutters),
+    );
+    const watch = vscode.commands.registerCommand(
+        "coverage-gutters.watchCoverageAndVisibleEditors",
+        gutters.watchCoverageAndVisibleEditors.bind(gutters),
+    );
+    const removeWatch = vscode.commands.registerCommand(
+        "coverage-gutters.removeWatch",
+        gutters.removeWatch.bind(gutters),
+    );
+    const remove = vscode.commands.registerCommand(
+        "coverage-gutters.removeCoverage",
+        gutters.removeCoverageForActiveFile.bind(gutters),
+    );
+
+    context.subscriptions.push(previewCoverageReport);
+    context.subscriptions.push(remove);
+    context.subscriptions.push(display);
+    context.subscriptions.push(toggle);
+    context.subscriptions.push(watch);
+    context.subscriptions.push(removeWatch);
+    context.subscriptions.push(gutters);
+    context.subscriptions.push(outputChannel);
 }
